@@ -1,105 +1,240 @@
-:root {
-    --bg-1: #0b0f14;
-    --bg-2: #0e1521;
-    --txt: #e6eef7;
-    --muted: #9fb3c8;
-    --accent: #47d6ff;
-    --accent-2: #7a5cff;
-}
+// La carga de librerías se mueve aquí para asegurar la inicialización correcta
+const loadScript = (url) => new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = url;
+    script.onload = resolve;
+    script.onerror = reject;
+    document.head.appendChild(script);
+});
 
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
+Promise.all([
+    loadScript("https://unpkg.com/three@0.159.0/build/three.min.js"),
+    loadScript("https://unpkg.com/gsap@3.12.5/dist/gsap.min.js"),
+    loadScript("https://unpkg.com/gsap@3.12.5/dist/ScrollTrigger.min.js"),
+    loadScript("https://unpkg.com/gsap@3.12.5/dist/ScrollToPlugin.min.js")
+]).then(() => {
+    document.addEventListener("DOMContentLoaded", () => {
+        gsap.registerPlugin(ScrollTrigger, ScrollToPlugin);
 
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    color: var(--txt);
-    background: var(--bg-1);
-    overflow-x: hidden;
-    scroll-behavior: smooth;
-}
+        // =========================
+        // 1) Loader de Carga
+        // =========================
+        gsap.to(".loader", {
+            opacity: 0,
+            duration: 1,
+            delay: 0.5,
+            ease: "power2.out",
+            onComplete: () => {
+                document.querySelector(".loader").style.display = "none";
+                initSite();
+            }
+        });
 
-section {
-    position: relative;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 20px;
-}
+        // =========================
+        // 2) Inicialización del sitio
+        // =========================
+        function initSite() {
+            // =========================
+            // a) Fondo: shader en bgCanvas
+            // =========================
+            const bg = document.getElementById("bgCanvas");
+            if (!bg) { console.warn("bgCanvas no encontrado"); return; }
+            const DPR = Math.min(window.devicePixelRatio || 1, 1.5);
+            const bgRenderer = new THREE.WebGLRenderer({ canvas: bg, antialias: true });
+            bgRenderer.setPixelRatio(DPR);
+            bgRenderer.setSize(window.innerWidth, window.innerHeight);
+            const bgScene = new THREE.Scene();
+            const bgCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+            const uniforms = {
+                u_time: { value: 0 },
+                u_mouse: { value: new THREE.Vector2(0.5, 0.5) },
+                u_color1: { value: new THREE.Color(0x47d6ff) },
+                u_color2: { value: new THREE.Color(0x7a5cff) }
+            };
+            const vert = `
+                varying vec2 vUv;
+                void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }
+            `;
+            const frag = `
+                precision highp float;
+                varying vec2 vUv;
+                uniform float u_time;
+                uniform vec2 u_mouse;
+                uniform vec3 u_color1;
+                uniform vec3 u_color2;
+                float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453123); }
+                float noise(vec2 p){
+                    vec2 i=floor(p), f=fract(p);
+                    float a=hash(i);
+                    float b=hash(i+vec2(1.,0.));
+                    float c=hash(i+vec2(0.,1.));
+                    float d=hash(i+vec2(1.,1.));
+                    vec2 u=f*f*(3.-2.*f);
+                    return mix(a,b,u.x)+(c-a)*u.y*(1.-u.x)+(d-b)*u.x*u.y;
+                }
+                void main(){
+                    vec2 uv=vUv;
+                    float dist=distance(uv,u_mouse);
+                    uv.x+=0.03*sin(u_time+uv.y*10.0);
+                    uv.y+=0.03*cos(u_time+uv.x*10.0);
+                    float n=noise(uv*5.0+u_time*0.1);
+                    float wave=sin(uv.x*10.0+u_time)+cos(uv.y*10.0+u_time);
+                    vec3 col=mix(u_color1,u_color2,wave*0.5+0.5+n*0.2);
+                    col+=(1.0-dist)*0.15;
+                    gl_FragColor=vec4(col,1.0);
+                }
+            `;
+            const bgMat = new THREE.ShaderMaterial({ uniforms, vertexShader: vert, fragmentShader: frag });
+            const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+            bgMesh.renderOrder = -1;
+            bgScene.add(bgMesh);
+            // =========================
+            // b) Capa de efectos: fxCanvas independiente
+            // =========================
+            const fxCanvas = document.createElement("canvas");
+            fxCanvas.id = "fxCanvas";
+            Object.assign(fxCanvas.style, {
+                position: "fixed",
+                inset: "0",
+                width: "100vw",
+                height: "100vh",
+                pointerEvents: "none",
+                zIndex: "9000",
+                opacity: "0",
+                visibility: "hidden",
+                transition: "opacity .3s ease"
+            });
+            document.body.appendChild(fxCanvas);
+            const fxRenderer = new THREE.WebGLRenderer({ canvas: fxCanvas, antialias: true, alpha: true });
+            fxRenderer.setPixelRatio(DPR);
+            fxRenderer.setSize(window.innerWidth, window.innerHeight);
+            const fxScene = new THREE.Scene();
+            const fxCam = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 50);
+            fxCam.position.z = 2.2;
+            const COUNT = 350;
+            const geom = new THREE.BufferGeometry();
+            const pos = new Float32Array(COUNT * 3);
+            const sizeArray = new Float32Array(COUNT);
+            for (let i = 0; i < COUNT; i++) {
+                const ix = i * 3;
+                pos[ix + 0] = (Math.random() - 0.5) * 2.0;
+                pos[ix + 1] = (Math.random() - 0.5) * 2.0;
+                pos[ix + 2] = Math.random() * 1.2;
+                sizeArray[i] = 10 + Math.random() * 20;
+            }
+            geom.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+            geom.setAttribute("size", new THREE.BufferAttribute(sizeArray, 1));
+            const pointsMat = new THREE.ShaderMaterial({
+                transparent: true,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                uniforms: {
+                    u_time: { value: 0.0 },
+                    u_opacity: { value: 0.9 }
+                },
+                vertexShader: `
+                    attribute float size;
+                    void main() {
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_PointSize = size * (300.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    precision highp float;
+                    uniform float u_opacity;
+                    void main() {
+                        float r = length(gl_PointCoord - vec2(0.5));
+                        float alpha = smoothstep(0.5, 0.2, r) * u_opacity;
+                        gl_FragColor = vec4(1.0, 0.0, 0.0, alpha); // rojo brillante
+                    }
+                `
+            });
+            const points = new THREE.Points(geom, pointsMat);
+            fxScene.add(points);
+            // =========================
+            // c) Overlay de transición
+            // =========================
+            const overlay = document.createElement("div");
+            Object.assign(overlay.style, {
+                position: "fixed",
+                inset: "0",
+                background: "linear-gradient(90deg, var(--accent, #47d6ff), var(--accent-2, #7a5cff))",
+                zIndex: "9999",
+                pointerEvents: "none",
+                transform: "scaleY(0)",
+                transformOrigin: "top"
+            });
+            document.body.appendChild(overlay);
 
-canvas {
-    position: absolute;
-    inset: 0;
-    z-index: 0;
-}
+            // =========================
+            // d) Loops de animación
+            // =========================
+            function loopBg(t) {
+                uniforms.u_time.value = t * 0.001;
+                bgRenderer.render(bgScene, bgCam);
+                requestAnimationFrame(loopBg);
+            }
+            requestAnimationFrame(loopBg);
 
-.content {
-    position: relative;
-    z-index: 1;
-    max-width: 800px;
-}
+            function loopFx(t) {
+                points.rotation.y += 0.0008;
+                points.rotation.x += 0.0004;
+                fxRenderer.render(fxScene, fxCam);
+                requestAnimationFrame(loopFx);
+            }
+            requestAnimationFrame(loopFx);
 
-h1 {
-    font-size: clamp(2rem, 5vw, 3.5rem);
-    margin-bottom: 15px;
-}
+            // =========================
+            // e) Transición y helpers
+            // =========================
+            function showFX(show) {
+                fxCanvas.style.visibility = show ? "visible" : "hidden";
+                fxCanvas.style.opacity = show ? "1" : "0";
+            }
+            function playTransition(callback) {
+                showFX(true);
+                gsap.timeline()
+                    .to(overlay, { scaleY: 1, duration: 0.45, ease: "power4.in" })
+                    .add(() => { if (callback) callback(); })
+                    .to(overlay, {
+                        scaleY: 0, duration: 0.45, ease: "power4.out", onComplete: () => showFX(false)
+                    });
+            }
 
-p {
-    color: var(--muted);
-    font-size: clamp(1rem, 2vw, 1.2rem);
-    max-width: 600px;
-    margin: 0 auto 20px;
-}
+            // =========================
+            // f) Animaciones de contenido
+            // =========================
+            gsap.utils.toArray(".fade-in").forEach((el) => {
+                gsap.fromTo(el,
+                    { opacity: 0, y: 30, rotateX: -15 },
+                    {
+                        opacity: 1, y: 0, rotateX: 0, duration: 1.2, ease: "power3.out",
+                        scrollTrigger: {
+                            trigger: el,
+                            start: "top 85%",
+                            toggleActions: "play none none none"
+                        }
+                    }
+                );
+            });
 
-a.btn, button.btn {
-    display: inline-block;
-    padding: 12px 24px;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    color: #06101a;
-    font-weight: bold;
-    border-radius: 8px;
-    border: none;
-    cursor: pointer;
-    transition: transform 0.3s ease, box-shadow 0.3s ease;
-    text-decoration: none;
-    text-transform: uppercase;
-}
-
-a.btn:hover, button.btn:hover {
-    transform: scale(1.05);
-    box-shadow: 0 8px 25px rgba(71, 214, 255, 0.4);
-}
-
-.fade-in {
-    opacity: 0;
-    transform: translateY(20px);
-}
-
-form input, form textarea {
-    width: 100%;
-    padding: 12px;
-    margin-bottom: 12px;
-    border-radius: 6px;
-    border: 1px solid var(--muted);
-    background: var(--bg-2);
-    color: var(--txt);
-    font-family: inherit;
-    font-size: 1rem;
-    transition: border-color 0.3s ease;
-}
-
-form input:focus, form textarea:focus {
-    outline: none;
-    border-color: var(--accent);
-}
-
-.loader {
-    position: fixed;
-    inset: 0;
-    background: var(--bg-1);
-    z-index: 10000;
-}
+            // =========================
+            // g) Desplazamiento suave con transición
+            // =========================
+            document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+                anchor.addEventListener('click', function (e) {
+                    e.preventDefault();
+                    const target = document.querySelector(this.getAttribute('href'));
+                    if (target) {
+                        playTransition(() => {
+                            gsap.to(window, { duration: 1, scrollTo: target, ease: "power4.inOut" });
+                        });
+                    }
+                });
+            });
+        }
+    });
+}).catch(err => {
+    console.error("Error al cargar las librerías:", err);
+});
